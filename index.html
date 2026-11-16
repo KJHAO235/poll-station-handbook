@@ -179,7 +179,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;font-weight:600
       </details>
       <p class="note"><a href="#review" style="color:var(--stamp);font-weight:600">審閱預先整理的問答庫</a>：逐題核對答案與手冊原頁。</p>
     </section>
-    <footer class="foot"><span id="offline">第一次開啟後會自動下載全部頁面，之後沒有網路也能用。</span><br>資料來源：中央選舉委員會《115 年地方公職人員選舉及全國性公民投票投開票所工作人員手冊》（115 年 9 月）。本站僅供查詢，實際規定以中選會及所屬選舉委員會為準。<br>iPhone：在 Safari 按「分享 → 加入主畫面」即可當 App 使用。</footer>
+    <footer class="foot"><span id="offline">第一次開啟後會自動下載全部頁面，之後沒有網路也能用。</span><br><span id="semStatus"></span><br>資料來源：中央選舉委員會《115 年地方公職人員選舉及全國性公民投票投開票所工作人員手冊》（115 年 9 月）。本站僅供查詢，實際規定以中選會及所屬選舉委員會為準。<br>iPhone：在 Safari 按「分享 → 加入主畫面」即可當 App 使用。</footer>
   </div>
 </main>
 
@@ -298,13 +298,22 @@ const QIDX = QA.map(it=>{const tf=new Map(),core=new Set();
 const QAVG=QIDX.reduce((a,b)=>a+b.len,0)/QIDX.length;
 const QDF=new Map();for(const d of QIDX)for(const k of d.tf.keys())QDF.set(k,(QDF.get(k)||0)+1);
 const QBY=Object.fromEntries(QA.map(x=>[x.id,x]));
-function matchQA(q){
+function bmAll(q){
   const terms=queryTerms(q),N=QIDX.length;
   const orig=[...terms].filter(([,w])=>w>=1).map(([t])=>t);
-  const res=QIDX.map(d=>{let s=0;for(const [t,w] of terms){const tf=d.tf.get(t);if(!tf)continue;const df=QDF.get(t);const idf=Math.log(1+(N-df+.5)/(df+.5));s+=w*idf*tf*2.2/(tf+1.2*(.25+.75*d.len/QAVG));}
-    const cov=orig.length?orig.filter(t=>d.core.has(t)).length/orig.length:0;return {it:d.it,s,cov}}).filter(r=>r.s>0).sort((a,b)=>b.s-a.s);
+  return QIDX.map(d=>{let s=0;for(const [t,w] of terms){const tf=d.tf.get(t);if(!tf)continue;const df=QDF.get(t);const idf=Math.log(1+(N-df+.5)/(df+.5));s+=w*idf*tf*2.2/(tf+1.2*(.25+.75*d.len/QAVG));}
+    const cov=orig.length?orig.filter(t=>d.core.has(t)).length/orig.length:0;return {it:d.it,s,cov}});
+}
+function matchQA(q){
+  const res=bmAll(q).filter(r=>r.s>0).sort((a,b)=>b.s-a.s);
   const top=res[0],second=res[1]?.s||0;const r=top?top.s/(second||1):0;const strong=!!top&&((top.cov>=.5&&top.s>=8&&r>=1.15)||(r>=1.5&&top.s>=10));
   return {list:res.slice(0,5),strong};
+}
+/* semantic + keyword: sem[i] is cosine similarity to item i's closest phrasing */
+function hybridQA(q,sem){
+  const all=bmAll(q);const mb=Math.max(...all.map(r=>r.s))||1;
+  const sc=all.map((r,i)=>({it:r.it,s:sem[i]+.1*r.s/mb,c:sem[i]})).sort((a,b)=>b.s-a.s);
+  return {list:sc.slice(0,5),strong:sc[0].c>=.7&&sc[0].s-sc[1].s>=.06};
 }
 function qaCard(it,label){
   const li=a=>a.map(x=>`<li>${linkPages(esc(x))}</li>`).join('');
@@ -397,6 +406,7 @@ document.addEventListener('keydown',e=>{if($('sheet').hidden)return;if(e.key==='
 document.addEventListener('click',e=>{const b=e.target.closest('[data-p]');if(b){e.preventDefault();openPage(b.dataset.p)}});
 
 /* ---------- best passages (offline, no AI) ---------- */
+let lastQ='',lastHits=[];
 const MARK=/^(（[一二三四五六七八九十]+）|[一二三四五六七八九十]+、|\d+、|[０-９]+、|（\d+）|（[０-９]+）|[１-９]、)/;
 function passage(p,terms){
   const lines=PAGES[p-1].t.split('\n');let best=-1,bi=0;
@@ -426,6 +436,7 @@ function run(q){
   const h=store.get('hist',[]).filter(x=>x!==q);h.unshift(q);store.set('hist',h.slice(0,12));renderHist();
   if(!strong) showBest(q,top,terms); else {$('answerBox').hidden=true;$('answerBox').innerHTML=''}
   window.scrollTo({top:0});
+  window.SEM?.rerank?.(q);
 }
 function renderHist(){
   const h=store.get('hist',[]);$('histBox').hidden=!h.length;
@@ -463,6 +474,35 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostnam
     navigator.serviceWorker.addEventListener('message',e=>{if(e.data==='cached'){const n=$('offline');if(n)n.textContent='已可離線使用（含 136 頁原頁圖片）'}});
   }).catch(()=>{});
 }
+</script>
+<script type="module">
+/* offline semantic matching: bge-small-zh (quantized) via transformers.js, all files served from this site */
+import { pipeline, env } from './vendor/transformers.min.js';
+const st=document.getElementById('semStatus');
+const say=s=>{if(st)st.textContent=s};
+say('語意比對載入中…（第一次約 35 MB）');
+try{
+  env.allowRemoteModels=false;env.allowLocalModels=true;env.localModelPath='models/';env.useBrowserCache=false;
+  env.backends.onnx.wasm.wasmPaths='vendor/';env.backends.onnx.wasm.numThreads=1;env.backends.onnx.wasm.proxy=false;
+  const [ext,buf]=await Promise.all([
+    pipeline('feature-extraction','Xenova/bge-small-zh-v1.5',{quantized:true}),
+    fetch('qa_emb.bin').then(r=>{if(!r.ok)throw new Error('emb');return r.arrayBuffer()})]);
+  const [n,dim]=new Uint32Array(buf,0,2);
+  if(n!==QA.reduce((a,x)=>a+1+x.alt.length,0))throw new Error('embedding count mismatch');
+  const scales=new Float32Array(buf,8,n),own=new Uint16Array(buf,8+4*n,n),data=new Int8Array(buf,8+6*n,n*dim);
+  const score=v=>{const best=new Float32Array(QA.length).fill(-1);
+    for(let k=0;k<n;k++){let s=0;const o=k*dim;for(let d=0;d<dim;d++)s+=v[d]*data[o+d];s*=scales[k];if(s>best[own[k]])best[own[k]]=s}
+    return best};
+  const embed=async q=>(await ext([q],{pooling:'cls',normalize:true})).data;
+  await embed('暖機');
+  window.SEM={ready:true,rerank:async q=>{
+    const v=await embed(q);if(q!==lastQ)return;
+    const m=hybridQA(q,score(v));const strong=showQA(q,m);
+    if(strong){$('answerBox').hidden=true;$('answerBox').innerHTML=''}else{const {terms,top}=search(q,8);showBest(q,top,terms)}
+  }};
+  say('語意比對已啟用');
+  if(lastQ)window.SEM.rerank(lastQ);
+}catch(e){console.warn('semantic matching unavailable',e);say('語意比對無法在此裝置啟用，改用關鍵字比對')}
 </script>
 
 </body>
